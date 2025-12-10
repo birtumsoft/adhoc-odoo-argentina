@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from dateutil.relativedelta import relativedelta
 from odoo import _, api, fields, models
 from odoo.exceptions import RedirectWarning, UserError
@@ -98,7 +96,10 @@ class l10nArPaymentWithholding(models.Model):
             partner=False,
             is_refund=False,
         )
-        tax_amount = taxes_res["taxes"][0]["amount"]
+        tax_amount = self.currency_id.round(taxes_res["total_included"] - taxes_res["total_excluded"])
+        # TODO: When Odoo fixes the compute_all method of account_tax, uncomment the line below and
+        # remove the line above. See Adhoc ticket 101778 for more information.
+        # tax_amount = taxes_res["taxes"][0]["amount"]
         tax_account_id = taxes_res["taxes"][0]["account_id"]
         tax_repartition_line_id = taxes_res["taxes"][0]["tax_repartition_line_id"]
 
@@ -169,7 +170,7 @@ class l10nArPaymentWithholding(models.Model):
 
     def _get_same_period_dates(self):
         self.ensure_one()
-        to_date = self.payment_id.date or datetime.date.today()
+        to_date = self.payment_id.date or fields.Date.context_today(self)
         from_date = to_date + relativedelta(day=1)
         return to_date, from_date
 

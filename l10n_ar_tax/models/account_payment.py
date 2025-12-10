@@ -33,7 +33,7 @@ class AccountPayment(models.Model):
         domain=[("l10n_ar_tax_ids.tax_type", "=", "withholding")],
     )
 
-    @api.depends("to_pay_move_line_ids", "partner_id")
+    @api.depends("to_pay_move_line_ids", "partner_id", "payment_method_line_id")
     def _compute_fiscal_position_id(self):
         for rec in self:
             if (
@@ -72,8 +72,14 @@ class AccountPayment(models.Model):
     @api.depends("l10n_ar_withholding_line_ids.amount")
     def _compute_payment_total(self):
         super()._compute_payment_total()
-        for rec in self:
-            rec.payment_total += sum(rec.l10n_ar_withholding_line_ids.mapped("amount"))
+        for rec in self.filtered("l10n_ar_withholding_line_ids"):
+            if (rec.payment_type == "outbound" and rec.partner_type == "customer") or (
+                rec.payment_type == "inbound" and rec.partner_type == "supplier"
+            ):
+                sign = -1
+            else:
+                sign = 1
+            rec.payment_total += sum(x * sign for x in rec.l10n_ar_withholding_line_ids.mapped("amount"))
 
     # por ahora no nos funciona computarlas, se duplica el importe. Igual conceptualemnte el onchange acá por ahí
     # está bien porque en realidad es una "sugerencia" actualizar el amount al usuario
@@ -92,6 +98,12 @@ class AccountPayment(models.Model):
             # empieza a salir un raise que no deja editar cosas
             rec.amount = amount if amount > 0 else 0
             # rec.unreconciled_amount = rec.to_pay_amount - rec.selected_debt
+
+    @api.onchange("partner_id")
+    def _onchange_partner_id(self):
+        for rec in self:
+            if rec.partner_id != rec._origin.partner_id:
+                rec._onchange_withholdings()
 
     # # ver mensaje en commit
     # @api.onchange('to_pay_amount', 'withholdable_advanced_amount', 'partner_id')
@@ -307,6 +319,12 @@ class AccountPayment(models.Model):
                 )
                 withholdings += [Command.create({"tax_id": x.id}) for x in taxes]
             rec.l10n_ar_withholding_line_ids = withholdings
+            # Si hay retenciones que no son de ganancias y el importe a retener es 0 las quitamos
+            # Ejemplo: retenciones en pagos de notas de crédito (el monto base es negativo)
+            to_remove = rec.l10n_ar_withholding_line_ids.filtered(
+                lambda wth: wth.amount == 0 and wth.tax_id.l10n_ar_tax_type != "earnings_scale"
+            )
+            rec.l10n_ar_withholding_line_ids -= to_remove
 
     def compute_to_pay_amount_for_check(self):
         checks_payments = self.filtered(
