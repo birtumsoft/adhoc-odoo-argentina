@@ -55,8 +55,7 @@ class AccountPayment(models.Model):
             rec.l10n_ar_fiscal_position_id = (
                 self.env["account.fiscal.position"]
                 .with_company(rec.company_id)
-                # TODO revisar porque llega active_test=False acá
-                .with_context(l10n_ar_withholding=True, active_test=True)
+                .with_context(l10n_ar_withholding=True)
                 ._get_fiscal_position(address)
             )
 
@@ -238,7 +237,7 @@ class AccountPayment(models.Model):
             res.append(
                 {
                     **self._get_withholding_move_line_default_values(),
-                    "name": _("Base Ret: ") + nice_base_label,
+                    "name": _("Withholding Base: ") + nice_base_label,
                     "tax_ids": [Command.set(withholding_lines.mapped("tax_id").ids)],
                     "account_id": account_id,
                     "balance": balance,
@@ -249,7 +248,7 @@ class AccountPayment(models.Model):
             res.append(
                 {
                     **self._get_withholding_move_line_default_values(),  # Counterpart 0 operation
-                    "name": _("Base Ret Cont: ") + nice_base_label,
+                    "name": _("Withholding Base Cont: ") + nice_base_label,
                     "account_id": account_id,
                     "balance": -balance,
                     "amount_currency": -amount_currency,
@@ -456,8 +455,10 @@ class AccountPayment(models.Model):
 
     @api.depends("l10n_ar_fiscal_position_id", "partner_id", "company_id", "date")
     def _compute_l10n_ar_withholding_line_ids(self):
+        # no entiendo porque pero acá viene un active_test=False que se termina propagando a computed fields que
+        # también dependan de partner_id, por ahora forzamos active_test=True para que aguas arriba todo se compute bien
         # metodo completamente analogo a payment.register._compute_l10n_ar_withholding_ids
-        for rec in self.filtered(lambda x: x.partner_type == "supplier"):
+        for rec in self.with_context(active_test=True).filtered(lambda x: x.partner_type == "supplier"):
             date = rec.date or fields.Date.context_today(rec)
             withholdings = [Command.clear()]
             if rec.l10n_ar_fiscal_position_id.l10n_ar_tax_ids:
@@ -466,6 +467,13 @@ class AccountPayment(models.Model):
                 )
                 withholdings += [Command.create({"tax_id": x.id}) for x in taxes]
             rec.l10n_ar_withholding_line_ids = withholdings
+
+    def _synchronize_to_moves(self, changed_fields):
+        # _recompute_tax_lines runs after _synchronize_to_moves rebuilds the payment lines
+        # and explicitly sets display_type='tax' on withholding lines (they have
+        # tax_repartition_line_id).
+        self = self.with_context(dynamic_unlink=True)
+        return super()._synchronize_to_moves(changed_fields)
 
     def compute_to_pay_amount_for_check(self):
         checks_payments = self.filtered(
@@ -479,8 +487,10 @@ class AccountPayment(models.Model):
             while not rec.currency_id.is_zero(rec.payment_difference):
                 if remining_attemps == 0:
                     raise UserError(
-                        "Máximo de intentos alcanzado. No pudimos computar el importe a pagar. El último importe a pagar"
-                        'al que llegamos fue "%s"' % rec.to_pay_amount
+                        _(
+                            'Maximum attempts reached. Could not compute the amount to pay. The last amount we reached was "%s"'
+                        )
+                        % rec.to_pay_amount
                     )
                 remining_attemps -= 1
                 # el payment difference es negativo, para entenderlo mejor lo pasamos a postivo
@@ -540,3 +550,11 @@ class AccountPayment(models.Model):
         currency_id."""
         self.ensure_one()
         return bundles.get(self._get_payment_bundle_key())
+
+    def _compute_to_pay_move_lines(self):
+        # When creating payments from the bulk payment wizard, we explicitly set
+        # to_pay_move_line_ids to the selected lines only, so we skip auto-computation
+        # to avoid _add_all() adding unrelated lines of different currencies.
+        if self.env.context.get("skip_to_pay_compute"):
+            return
+        return super()._compute_to_pay_move_lines()
