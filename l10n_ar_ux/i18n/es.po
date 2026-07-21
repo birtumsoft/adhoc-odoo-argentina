@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Odoo Server 19.0+e\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-27 19:28+0000\n"
+"POT-Creation-Date: 2026-06-30 14:17+0000\n"
 "PO-Revision-Date: 2026-05-27 19:29+0000\n"
 "Last-Translator: \n"
 "Language-Team: \n"
@@ -79,6 +79,11 @@ msgstr "De acuerdo a la responsabilidad de IVA"
 #: model:ir.model,name:l10n_ar_ux.model_account_chart_template
 msgid "Account Chart Template"
 msgstr "Plantilla de plan contable"
+
+#. module: l10n_ar_ux
+#: model_terms:ir.ui.view,arch_db:l10n_ar_ux.view_account_invoice_report_search
+msgid "Accounting Date: Last Month"
+msgstr "Fecha contable: Mes anterior"
 
 #. module: l10n_ar_ux
 #: model:ir.model.fields,field_description:l10n_ar_ux.field_res_company__l10n_ar_report_signed_by

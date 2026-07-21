@@ -2,8 +2,6 @@
 # For copyright and license notices, see __manifest__.py file in module root
 # directory
 ##############################################################################
-from collections import defaultdict
-
 from odoo import Command, _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
 
@@ -144,7 +142,8 @@ class AccountPayment(models.Model):
             # empieza a salir un raise que no deja editar cosas
             rec.amount = amount if amount > 0 else 0
             # Sincronizar amount_exact con el nuevo amount para mantener consistencia
-            rec.amount_exact = rec.amount
+            if rec.currency_id and not rec.currency_id.is_zero(rec.amount - rec.amount_exact):
+                rec.amount_exact = rec.amount
             # rec.unreconciled_amount = rec.to_pay_amount - rec.selected_debt
 
     @api.onchange("partner_id")
@@ -388,6 +387,26 @@ class AccountPayment(models.Model):
 
         return super().action_post()
 
+    def action_draft(self):
+        # The supplier payment receipt PDF is cached (attachment_use on
+        # account.report_payment_receipt). Resetting to draft means the payment
+        # may be edited (amounts, withholdings, reconciliation) and reposted
+        # under the same name, which would otherwise serve the stale cached PDF.
+        # Drop the cached receipt so it is regenerated on the next render.
+        self._unlink_cached_payment_receipt()
+        return super().action_draft()
+
+    def _unlink_cached_payment_receipt(self):
+        report = self.env.ref("account.action_report_payment_receipt", raise_if_not_found=False)
+        if not report:
+            return
+        for payment in self:
+            # retrieve_attachment evalúa la misma expresión `attachment` del
+            # reporte (devuelve None si no corresponde cachear, p.ej. clientes).
+            attachment = report.retrieve_attachment(payment)
+            if attachment:
+                attachment.unlink()
+
     @api.model
     def _get_trigger_fields_to_synchronize(self):
         res = super()._get_trigger_fields_to_synchronize()
@@ -468,13 +487,6 @@ class AccountPayment(models.Model):
                 withholdings += [Command.create({"tax_id": x.id}) for x in taxes]
             rec.l10n_ar_withholding_line_ids = withholdings
 
-    def _synchronize_to_moves(self, changed_fields):
-        # _recompute_tax_lines runs after _synchronize_to_moves rebuilds the payment lines
-        # and explicitly sets display_type='tax' on withholding lines (they have
-        # tax_repartition_line_id).
-        self = self.with_context(dynamic_unlink=True)
-        return super()._synchronize_to_moves(changed_fields)
-
     def compute_to_pay_amount_for_check(self):
         checks_payments = self.filtered(
             lambda x: x.payment_method_code in ["in_third_party_checks", "out_third_party_checks"]
@@ -519,6 +531,17 @@ class AccountPayment(models.Model):
                 {"l10n_ar_withholding_line_ids"}
             )
 
+    def _get_bundle_payment_total(self, payment_bundle):
+        """Total to display in the bundled receipt 'Total Paid' footer.
+        Sums payment_total across all payments in the bundle.
+        Override in modules where the first payment already aggregates the rest (e.g. l10n_ar_payment_bundle).
+        """
+        return sum(payment_bundle.mapped("payment_total"))
+
+    def _get_bundle_imputed_total(self, payment_bundle):
+        """Total to display in the bundled receipt 'Total Imputed' footer."""
+        return sum(payment_bundle.mapped("matched_amount")) + sum(payment_bundle.mapped("unmatched_amount"))
+
     def _get_name_receipt_report(self, report_xml_id):
         """Method similar to the '_get_name_invoice_report' of l10n_latam_invoice_document
         Basically it allows different localizations to define it's own report
@@ -533,23 +556,7 @@ class AccountPayment(models.Model):
     def _get_payment_bundle_key(self):
         if self.company_id.country_id.code == "AR" and self.env.context.get("print_in_bundles"):
             return f"{self.company_id.id}-{self.partner_id.id}-{self.payment_type}-{self.currency_id.id if self.currency_id != self.company_currency_id else self.counterpart_currency_id.id}"
-        return self.id
-
-    def _get_payment_bundles(self):
-        """Returns a dictionary of payment bundles, where the key is a tuple
-        of (company_id, partner_id, payment_type, currency_id) and the value
-        is a recordset of account.payment."""
-        bundles = defaultdict(lambda: self.env["account.payment"])
-        for rec in self:
-            bundles[rec._get_payment_bundle_key()] += rec
-        return bundles
-
-    def _select_bundle(self, bundles):
-        """Selects a bundle from the dictionary of payment bundles based on
-        the current record's company_id, partner_id, payment_type, and
-        currency_id."""
-        self.ensure_one()
-        return bundles.get(self._get_payment_bundle_key())
+        return super()._get_payment_bundle_key()
 
     def _compute_to_pay_move_lines(self):
         # When creating payments from the bulk payment wizard, we explicitly set
