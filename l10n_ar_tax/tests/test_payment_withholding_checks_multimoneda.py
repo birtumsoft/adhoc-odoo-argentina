@@ -10,6 +10,19 @@ class TestPaymentChecksWithholding(TestPaymentWithholdingMultimoneda):
     Valida que la combinación de N líneas de liquidez (un cheque por línea, F.2)
     y el cálculo de retenciones argentinas funciona correctamente en los
     distintos escenarios de moneda.
+
+    Cubre FCP-R10-E1/E3/E5/E6 (ver TC.6/TC.7/TC.9/TC.8 respectivamente): que el
+    cheque quede cargado por el neto, con la retención separada en su propia
+    línea, en cada combinación de monedas. Lo que estos tests **no** verifican
+    es que el asiento del débito posterior excluya la retención (parte de
+    "qué tiene que dar" de R10 base): el botón de débito y su wizard viven en
+    ``l10n_latam_check_ux``, que este módulo no declara como dependencia —
+    combinarlo acá reproduciría el mismo bug de aislamiento de CI que
+    ``reference_runbot_modified_modules_dependency_scope`` documenta. Esa
+    verificación queda cubierta por composición: el débito mueve siempre el
+    importe propio de la línea de liquidez del cheque, sin mirar retenciones
+    (``l10n_latam_check_ux:test_debit_one_check_of_many``), y esa línea ya está
+    probada acá como el neto.
     """
 
     @classmethod
@@ -91,6 +104,8 @@ class TestPaymentChecksWithholding(TestPaymentWithholdingMultimoneda):
         - payment.amount = 1 180 ARS (neto pagado)
         - 3 líneas en el asiento: 1 liquidez + 1 retención + 1 contrapartida
         - sum(balances) == 0
+
+        Cubre FCP-R10-E1 (base: un cheque por el neto).
         """
         invoice = self._create_invoice(1_000, self.ars)
         payment = self._create_check_payment_with_wth(
@@ -140,6 +155,8 @@ class TestPaymentChecksWithholding(TestPaymentWithholdingMultimoneda):
         - withholdings_amount = 36 000 / 1200 = 30 USD
         - 4 líneas: 2 liquidez + 1 retención + 1 contrapartida
         - sum(balances) == 0
+
+        Cubre FCP-R10-E3 (dos cheques propios + retención: la suma es el neto).
         """
         invoice = self._create_invoice(1_000, self.usd)
         payment = self._create_check_payment_with_wth(
@@ -196,6 +213,9 @@ class TestPaymentChecksWithholding(TestPaymentWithholdingMultimoneda):
         Verifica:
         - 5 líneas: 2 liquidez + 1 retención + 1 write-off + 1 contrapartida
         - sum(balances) == 0
+
+        Cubre FCP-R10-E6 (cheque propio + retención + write-off: cuatro líneas
+        separadas y correctas).
         """
         invoice = self._create_invoice(1_000, self.usd)
         debt = invoice.line_ids.filtered(lambda l: l.account_id.account_type == "liability_payable")
@@ -253,6 +273,9 @@ class TestPaymentChecksWithholding(TestPaymentWithholdingMultimoneda):
         - 4 líneas: 2 liquidez + 1 retención + 1 contrapartida
         - balance de cada liquidez = amount_currency / accounting_rate
         - sum(balances) == 0
+
+        Cubre FCP-R10-E5 (cheque propio en USD con retención en ARS: el
+        asiento no cruza importe en moneda con importe en pesos).
         """
         invoice = self._create_invoice(1_000, self.usd)
         payment = self._create_check_payment_with_wth(
@@ -300,4 +323,40 @@ class TestPaymentChecksWithholding(TestPaymentWithholdingMultimoneda):
         self.assertAlmostEqual(abs(wth_ml.amount_currency), 36_000, places=0)
         self.assertAlmostEqual(abs(wth_ml.balance), 36_000, places=0)
 
+        self.assertAlmostEqual(sum(lines.mapped("balance")), 0, places=2)
+
+    # ------------------------------------------------------------------
+    # TC.10 — re-sincronización en borrador con retención + write-off
+    # ------------------------------------------------------------------
+
+    def test_tc10_resync_en_borrador_con_retencion_y_write_off(self):
+        """TC.10 · Re-sincronización del asiento en borrador con N cheques +
+        retención + write-off.
+
+        Es el único escenario donde el mapeo de líneas de core corre sobre un pago
+        con varias líneas de liquidez (``_synchronize_to_moves`` sale antes si el
+        asiento ya está posteado). Escribir ``amount`` sin cambiar el importe no
+        debe perder ni duplicar las líneas extra: cubre el corte
+        ``line_vals_list[len(liquidity) + 1:]``, que asume que después de las
+        líneas de liquidez viene exactamente una de contrapartida.
+        """
+        invoice = self._create_invoice(1_000, self.usd)
+        payment = self._create_check_payment_with_wth(
+            self.bank_ars,
+            invoice,
+            [{"name": "00000130", "amount": 678_000}, {"name": "00000131", "amount": 678_000}],
+            write_off_type_id=self.write_off_type.id,
+            write_off_amount=50,
+        )
+        payment.action_post()
+        expected = len(payment.move_id.line_ids)
+
+        payment.action_draft()
+        payment.write({"amount": payment.amount})
+
+        lines = payment.move_id.line_ids
+        self.assertEqual(len(lines), expected, "La re-sincronización no debe agregar ni quitar líneas")
+        self.assertEqual(len(lines.filtered(lambda l: l.account_id == payment.outstanding_account_id)), 2)
+        self.assertEqual(len(self._wth_move_lines(payment)), 1, "1 línea de retención")
+        self.assertEqual(len(lines.filtered(lambda l: l.account_id == self.write_off_type.account_id)), 1)
         self.assertAlmostEqual(sum(lines.mapped("balance")), 0, places=2)
